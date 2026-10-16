@@ -185,8 +185,25 @@ export function loadConfig({ reload = false } = {}) {
     }
   }
   cached = deepMerge(DEFAULT_CONFIG, fromDisk)
+  applyEnvOverrides(cached)
   cached.topicsById = Object.fromEntries(cached.topics.map((t) => [t.id, t]))
   return cached
+}
+
+/**
+ * Environment overrides, so the same radar.config.json can drive a run in a
+ * place that has no OpenCode service — notably the static build on a CI runner.
+ */
+function applyEnvOverrides(cfg) {
+  if (process.env.RADAR_NO_CURATE === "1") cfg.curator.enabled = false
+  if (process.env.RADAR_REFRESH_MINUTES) {
+    const minutes = Number(process.env.RADAR_REFRESH_MINUTES)
+    if (Number.isFinite(minutes) && minutes > 0) cfg.refreshMinutes = minutes
+  }
+  if (process.env.RADAR_PORT) {
+    const port = Number(process.env.RADAR_PORT)
+    if (Number.isFinite(port) && port > 0) cfg.port = port
+  }
 }
 
 export function saveConfigJson(partial) {

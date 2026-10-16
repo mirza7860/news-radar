@@ -92,6 +92,12 @@ button {
   color: inherit;
 }
 
+/* Several controls are removed outright in the static mirror. Keep the
+   attribute authoritative over the component layouts below. */
+[hidden] {
+  display: none !important;
+}
+
 :focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;

@@ -20,6 +20,13 @@ const state = {
 }
 
 const el = (id) => document.getElementById(id)
+
+/* The same client also runs as a read-only mirror on GitHub Pages, against
+   pre-baked JSON instead of the local API. See scripts/export-static.mjs. */
+const STATIC = Boolean(window.__RADAR_STATIC__)
+const API_BASE = window.__RADAR_API_BASE__ ?? "/api"
+const BUILT_AT = Number(window.__RADAR_BUILT_AT__) || 0
+
 const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ESCAPES[c])
 
@@ -97,9 +104,18 @@ function topicName(id) {
 /* --- data ---------------------------------------------------------------- */
 
 async function api(path, options) {
-  const res = await fetch(path, options)
+  const res = await fetch(STATIC ? staticPath(path) : path, options)
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
+}
+
+/** /api/items?hours=48 -> ./api/items.json ; /api/briefs/abc -> ./api/briefs/abc.json */
+function staticPath(path) {
+  const name = String(path)
+    .replace(/^\/?api\/?/, "")
+    .split("?")[0]
+    .replace(/\/+$/, "")
+  return `${API_BASE}/${name}.json`
 }
 
 async function loadBootstrap() {
@@ -132,8 +148,20 @@ async function loadBootstrap() {
 
 function renderStatus() {
   const node = el("status")
-  const last = state.scan?.last
   const dot = (cls) => `<span class="status-dot ${cls}"></span>`
+
+  if (STATIC) {
+    const seen = state.scan?.last?.items_seen
+    node.innerHTML = `${dot("is-live")}<span>Read-only mirror of a local radar, rebuilt ${
+      BUILT_AT ? timeAgo(BUILT_AT) : "hourly"
+    }${seen ? ` from ${seen} collected items` : ""}.</span>`
+    el("brand-sub").textContent = state.stats
+      ? `${state.stats.last24h} stories in the last 24 hours`
+      : "static mirror"
+    return
+  }
+
+  const last = state.scan?.last
 
   if (state.scanning) {
     node.innerHTML = `${dot("is-live")}<span>${esc(state.scanStep ?? "Scanning")}</span>`
@@ -267,6 +295,10 @@ function entryHtml(entry) {
 function renderBrief() {
   const view = el("view-brief")
   const brief = state.brief
+  // There is nothing to re-scan in a mirror; offer the archive instead.
+  const retry = STATIC
+    ? `<button class="ghost" data-action="explore">Browse the last 48 hours</button>`
+    : `<button class="primary" data-action="scan">Scan now</button>`
 
   if (!brief) {
     view.innerHTML = `<div class="state">
@@ -274,7 +306,7 @@ function renderBrief() {
       <p>Radar collects headlines from ${state.sources.length || 36} sources and has the curator write a brief every ${
         state.refreshMinutes
       } minutes. Nothing has been written yet.</p>
-      <div class="state-actions"><button class="primary" data-action="scan">Scan now</button></div>
+      <div class="state-actions">${retry}</div>
     </div>`
     return
   }
@@ -285,7 +317,7 @@ function renderBrief() {
       <p>Headlines were collected and stored, so nothing was lost. The brief for this scan failed to generate.</p>
       <div class="state-error">${esc(brief.error ?? "unknown error")}</div>
       <div class="state-actions">
-        <button class="primary" data-action="scan">Scan again</button>
+        ${STATIC ? "" : `<button class="primary" data-action="scan">Scan again</button>`}
         <button class="ghost" data-action="explore">Browse the ${state.stats?.last24h ?? 0} stories instead</button>
       </div>
     </div>`
@@ -362,14 +394,18 @@ function itemHtml(item) {
         <span>${clock(item.publishedAt)}</span>
       </div>
     </div>
-    <div class="item-actions">
+    ${
+      STATIC
+        ? ""
+        : `<div class="item-actions">
       <button class="icon-btn" data-act="read" aria-pressed="${item.read}" title="Mark read" aria-label="Mark read">
         <svg viewBox="0 0 24 24"><path d="M4 12.5l5 5 11-11"/></svg>
       </button>
       <button class="icon-btn" data-act="save" aria-pressed="${item.saved}" title="Save" aria-label="Save">
         <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg>
       </button>
-    </div>
+    </div>`
+    }
   </article>`
 }
 
@@ -423,8 +459,12 @@ function renderExplore() {
       ${chips}
       <input class="search" type="search" id="filter-q" placeholder="Search headlines and summaries" value="${esc(q)}" />
       <select class="search" id="filter-source">${sourceOptions}</select>
-      <button class="chip" data-act="unread" aria-pressed="${unread}">Unread</button>
-      <button class="chip" data-act="saved" aria-pressed="${saved}">Saved</button>
+      ${
+        STATIC
+          ? ""
+          : `<button class="chip" data-act="unread" aria-pressed="${unread}">Unread</button>
+      <button class="chip" data-act="saved" aria-pressed="${saved}">Saved</button>`
+      }
     </div>
     ${feed}
   `
@@ -445,9 +485,35 @@ function render() {
   else renderExplore()
 }
 
+/**
+ * The live server filters in SQL. The static mirror ships the whole 48-hour
+ * window in one file, so the same filters are applied here instead.
+ */
+function filterLocally(items, filters) {
+  const cutoff = Date.now() - 48 * 3600_000
+  const term = normText(filters.q)
+  return items.filter((item) => {
+    if (item.publishedAt < cutoff) return false
+    if (filters.topic !== "all" && item.topic !== filters.topic) return false
+    if (filters.source !== "all" && item.sourceId !== filters.source) return false
+    if (filters.unread && item.read) return false
+    if (filters.saved && !item.saved) return false
+    if (term && !normText(`${item.title} ${item.summary ?? ""} ${item.sourceName}`).includes(term)) return false
+    return true
+  })
+}
+
 async function loadItems({ reset = true } = {}) {
   const { topic, source, q, unread, saved } = state.filters
   if (reset) state.limit = 120
+
+  if (STATIC) {
+    const all = await api("/api/items")
+    state.items = filterLocally(all.items, state.filters).slice(0, state.limit)
+    renderExplore()
+    return
+  }
+
   const params = new URLSearchParams({
     hours: "48",
     limit: String(state.limit),
@@ -470,12 +536,14 @@ function setView(view) {
   el("view-brief").hidden = view !== "brief"
   el("view-explore").hidden = view !== "explore"
   el("hero").hidden = view !== "brief"
-  el("mark-read").hidden = view !== "brief"
+  // Never in the mirror: there is nowhere to record that it was read.
+  el("mark-read").hidden = STATIC || view !== "brief"
   if (view === "explore") loadItems()
   else renderBrief()
 }
 
 async function triggerScan() {
+  if (STATIC) return
   el("scan-now").disabled = true
   el("scan-now").textContent = "Starting…"
   try {
@@ -493,6 +561,7 @@ async function triggerScan() {
 }
 
 function connectEvents() {
+  if (STATIC) return
   const stream = new EventSource("/api/events")
   stream.onmessage = (message) => {
     let event
@@ -574,7 +643,7 @@ document.addEventListener("click", async (event) => {
   }
 
   const itemNode = target.closest(".item")
-  if (itemNode && target.dataset.act) {
+  if (itemNode && target.dataset.act && !STATIC) {
     const id = itemNode.dataset.id
     const item = state.items.find((i) => i.id === id)
     if (!item) return
@@ -629,6 +698,7 @@ el("strip").addEventListener("focusin", (event) => {
 el("strip").addEventListener("focusout", () => hideTip())
 
 el("mark-read").addEventListener("click", async () => {
+  if (STATIC) return
   const ids = []
   if (state.brief?.payload?.lead?.item?.id) ids.push(state.brief.payload.lead.item.id)
   for (const section of state.brief?.payload?.sections ?? []) {
@@ -651,6 +721,7 @@ window.addEventListener("scroll", () => hideTip(0), { passive: true })
 /* --- model dialog ------------------------------------------------------- */
 
 async function openModelDialog() {
+  if (STATIC) return
   const dialog = el("model-dialog")
   const fields = el("model-fields")
   dialog.hidden = false
@@ -737,21 +808,41 @@ document.addEventListener("DOMContentLoaded", async () => {
   tip.addEventListener("mouseleave", () => hideTip())
   document.body.appendChild(tip)
 
-  el("footer-note").textContent = `Headlines come from ${state.sources.length} sources; the brief is written locally by an OpenCode agent.`
+  if (STATIC) {
+    // Nothing on this page can write: hide the controls that would try.
+    el("scan-now").hidden = true
+    el("mark-read").hidden = true
+    el("link-models").parentElement.hidden = true
+  }
 
   try {
     await loadBootstrap()
   } catch (err) {
-    el("view-brief").innerHTML = `<div class="state">
+    el("view-brief").innerHTML = STATIC
+      ? `<div class="state">
+      <h2>The mirror didn't load</h2>
+      <p>This page renders a pre-built snapshot and could not read it.</p>
+      <div class="state-error">${esc(err.message)}</div>
+    </div>`
+      : `<div class="state">
       <h2>Can't reach the local server</h2>
       <p>Radar's server is not answering on this port. Start it with <code>npm start</code> and reload.</p>
       <div class="state-error">${esc(err.message)}</div>
     </div>`
   }
+
+  // After bootstrap, so the source count is real rather than "0 sources".
+  el("footer-note").textContent = STATIC
+    ? `A read-only mirror of a personal radar. Headlines come from ${state.sources.length} sources, collected hourly by a GitHub Actions workflow; the brief is the last one written locally by an OpenCode agent.`
+    : `Headlines come from ${state.sources.length} sources; the brief is written locally by an OpenCode agent.`
+
   setView("brief")
   connectEvents()
-  setInterval(() => {
-    renderStatus()
-    renderStrip()
-  }, 60000)
+
+  if (!STATIC) {
+    setInterval(() => {
+      renderStatus()
+      renderStrip()
+    }, 60000)
+  }
 })

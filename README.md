@@ -172,6 +172,69 @@ scan fires, the headlines are still collected and stored — you just get the
 
 ---
 
+## Publishing a read-only mirror to GitHub Pages
+
+GitHub Pages serves files. It has no Node runtime, no SQLite, and no model, so
+**the radar server itself cannot run there** — what gets published is a static
+mirror of it. That mirror is genuinely useful: everything except the brief is
+rebuilt from live feeds every hour.
+
+`.github/workflows/deploy-pages.yml` runs on every push, on demand, and hourly
+at :17. Each run:
+
+1. `npm ci`
+2. `npm run scan` with `RADAR_NO_CURATE=1` — collects and scores every feed,
+   skipping only the model call
+3. `npm run export` — bakes the API responses to JSON in `dist/`
+4. uploads `dist/` and deploys it to Pages
+
+### One-time setup
+
+Pages has to be pointed at the workflow once; this is a repository setting, and
+the workflow's token is not allowed to change it:
+
+**Settings → Pages → Build and deployment → Source: GitHub Actions.**
+
+Then push, or run the workflow from the **Actions** tab. The URL is
+`https://<user>.github.io/news-radar/`.
+
+### What updates, and what doesn't
+
+| Part of the page | In the mirror |
+| --- | --- |
+| Headlines, Explore, search, topic and source filters | **Rebuilt every hour** from live feeds |
+| The 24-hour strip and its tooltip | **Rebuilt every hour** |
+| Source health, item counts, stats | **Rebuilt every hour** |
+| Mark read / save / Scan now / curator model | **Removed** — a static page cannot write |
+| The brief | **Carried over** from `snapshot/brief.json` |
+
+The brief is the only part that needs a language model. To give the public site
+a fresh brief, curate locally and publish the result:
+
+```bash
+npm start                          # let a scan finish and write a brief
+npm run snapshot-brief             # copies that brief into snapshot/brief.json
+git add snapshot/brief.json && git commit -m "brief: refresh" && git push
+```
+
+`npm run export` prefers a real brief in the local database and falls back to
+the snapshot, so running it locally gives you a preview of exactly what Pages
+will serve. `dist/` is a throwaway build directory and is git-ignored.
+
+Two things worth knowing about the scheduled run: GitHub disables cron
+workflows after 60 days without repository activity, and a scheduled run can
+start several minutes late when the queue is busy.
+
+### If you want the *live* app on the internet
+
+The mirror is read-only by construction. To run the real thing with its own
+hourly scans and live briefs, it needs a host with a running Node process and a
+persistent disk — Render, Fly.io, Railway, or a small VPS — plus a reachable
+model. Keep it private: the server binds to `127.0.0.1` by default and has no
+authentication.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -183,6 +246,8 @@ scan fires, the headlines are still collected and stored — you just get the
 | A source stopped appearing | Run `npm run verify-sources`. Radar tracks per-feed status in the `source_health` table and drops a broken feed without failing the whole scan. |
 | Explore looks empty while a brief exists | Explore defaults to recent items and the filters may be left on. Clear the search box and the topic chips. |
 | Everything looks stale | Read the header status line. If a scan is running, wait — the model call alone takes 40–60 seconds. |
+| The Pages workflow fails at *Configure Pages* | Pages is not enabled, or its source is not set to *GitHub Actions*. See the Pages section above. |
+| The published mirror shows an old brief | Expected — a runner has no model. Refresh `snapshot/brief.json` and push. |
 
 ---
 
@@ -325,6 +390,8 @@ npm run verify-sources -- research     # only feeds whose id/category matches
 | `npm run reclassify`      | Re-run topic classification, scoring, and summary cleaning over the whole store. Use after editing topics, keywords, or the mute list. |
 | `npm run verify-sources`  | Probe every feed and report which ones work.                             |
 | `npm run compare-models`  | A/B the candidate curator models on real data.                           |
+| `npm run snapshot-brief`  | Copy the current brief into `snapshot/brief.json` for the Pages build.   |
+| `npm run export`          | Build the static mirror into `dist/`.                                    |
 
 The server also repairs stored rows on every scan (classification, scores, and
 summaries are rewritten), so collector changes self-heal over the collection

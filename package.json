@@ -13,6 +13,8 @@
     "scan": "node server/scan-cli.js",
     "reclassify": "node server/reclassify.mjs",
     "verify-sources": "node server/verify-sources.mjs",
-    "compare-models": "node server/compare-models.mjs"
+    "compare-models": "node server/compare-models.mjs",
+    "snapshot-brief": "node scripts/export-static.mjs --snapshot",
+    "export": "node scripts/export-static.mjs"
   }
 }

@@ -1,0 +1,72 @@
+name: Deploy the static mirror
+
+# GitHub Pages can only serve files, so this does not run the radar server.
+# It collects the headlines fresh, bakes the client's API responses to JSON
+# with scripts/export-static.mjs, and publishes the result to Pages.
+#
+# The one thing a runner cannot do is write the brief: that needs a language
+# model, and there is no OpenCode service here. So the brief is carried over
+# from the last local curation in snapshot/brief.json. Refresh it whenever you
+# want the public brief to change:  npm run snapshot-brief  &&  git push
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Hourly, at :17 — GitHub queues cron jobs at the top of the hour, so an
+    # offset start is more reliable than "0 * * * *".
+    - cron: "17 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; a newer run supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Collect headlines
+        # Curating needs a model, which a runner does not have. Collection,
+        # scoring and the strip are pure code, so they still run in full.
+        env:
+          RADAR_NO_CURATE: "1"
+        run: npm run scan
+
+      - name: Build the static mirror
+        run: npm run export
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
