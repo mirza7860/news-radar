@@ -113,28 +113,62 @@ npm run verify-sources   # probe all 36 feeds and report which ones work
 that terminal — or restarting your computer — stops Radar.** Nothing is
 registered as a service or startup entry by default.
 
-Three ways to make it survive a restart, simplest first:
+Two ways to make it survive a restart.
 
-**Windows — Task Scheduler (no extra software).**
+### Windows — register a scheduled task (one command)
 
-1. Open *Task Scheduler* and choose *Create Task…* (not *Basic Task*).
-2. **General** — name it `AI Radar`; select *Run only when user is logged on*.
-   Tick *Run with highest privileges* if your OpenCode service needs it.
-3. **Triggers** — *New…* → begin the task *At log on*.
-4. **Actions** — *New…* → Program/script `node`, arguments `server/index.js`,
-   and set *Start in* to the folder you cloned into.
-5. **Settings** — tick *If the task is already running, do not start a new
-   instance*, and untick *Stop the task if it runs longer than…* (Radar is meant
-   to stay up).
+A logon-triggered scheduled task starts Radar whenever you sign in. Paste this
+into PowerShell; it needs no admin rights and is re-runnable (it overwrites):
 
-Radar refreshes on its own schedule, so that is the entire setup — no cron, no
-watcher process.
+```powershell
+$proj = (Get-Location).Path                       # run this from the repo root
+$node = (Get-Command node).Source
+$user = "$env:USERDOMAIN\$env:USERNAME"
 
-**macOS / Linux** — a `launchd` agent or a systemd user unit pointing at
-`node server/index.js` with the working directory set to the repo.
+Register-ScheduledTask -TaskName "AI Radar" -Force `
+  -Action    (New-ScheduledTaskAction -Execute $node -Argument "server\index.js" -WorkingDirectory $proj) `
+  -Trigger   (New-ScheduledTaskTrigger -AtLogOn -User $user) `
+  -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) `
+  -Settings  (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable) `
+  -Description "Starts the local AI Radar news server (node server/index.js) at logon."
+```
 
-**Any platform** — keep a terminal open. Least setup, and fine if you only use
-Radar while you are at the machine.
+The two settings that matter are `-ExecutionTimeLimit (New-TimeSpan -Seconds 0)`
+(no time limit — Radar is a long-running server) and `-MultipleInstances
+IgnoreNew` (never start a second copy while one is already up).
+
+Test it immediately without logging out:
+
+```powershell
+Start-ScheduledTask  -TaskName "AI Radar"    # starts it now
+Get-ScheduledTaskInfo -TaskName "AI Radar"   # expect LastTaskResult 267009 while running
+```
+
+Remove it again with:
+
+```powershell
+Unregister-ScheduledTask -TaskName "AI Radar" -Confirm:$false
+```
+
+> Note: `LastTaskResult` reports `267009` (`0x41301`) while a task is running —
+> that is success, not an error code.
+
+### macOS / Linux
+
+A `launchd` agent or a systemd user unit pointing at `node server/index.js` with
+the working directory set to the repo.
+
+### Or just keep a terminal open
+
+The least setup of all, and entirely fine if you only use Radar while you are at
+the machine.
+
+In all cases, **OpenCode must be available for the curation step.** Radar's
+client discovers and starts the OpenCode service if it is not already running,
+but the service has to be installed and signed in. If it is unreachable when a
+scan fires, the headlines are still collected and stored — you just get the
+"curator didn't answer" state until a model responds again.
 
 ---
 
