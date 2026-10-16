@@ -20,6 +20,12 @@ call to your local OpenCode service.
 > in a browser — a self-contained explainer of every stage, the source list, and
 > the decisions (and dead ends) behind the design.
 
+**Live read-only mirror:** <https://mirza7860.github.io/news-radar/> — the same
+interface, published to GitHub Pages and rebuilt from live feeds every hour by
+GitHub Actions. It is a static copy: the brief is not regenerated there, and the
+write actions are removed. See
+[Publishing a read-only mirror](#publishing-a-read-only-mirror-to-github-pages).
+
 ![AI Radar — the daily brief: the 24-hour signal strip, the day's lead story on the highlighter, and the themed sections below](docs/radar-brief.png)
 
 ---
