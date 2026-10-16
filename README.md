@@ -128,27 +128,53 @@ into PowerShell; it needs no admin rights and is re-runnable (it overwrites):
 
 ```powershell
 $proj = (Get-Location).Path                       # run this from the repo root
-$node = (Get-Command node).Source
 $user = "$env:USERDOMAIN\$env:USERNAME"
+$vbs  = "$proj\scripts\start-hidden.vbs"
 
 Register-ScheduledTask -TaskName "AI Radar" -Force `
-  -Action    (New-ScheduledTaskAction -Execute $node -Argument "server\index.js" -WorkingDirectory $proj) `
+  -Action    (New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "`"$vbs`"") `
   -Trigger   (New-ScheduledTaskTrigger -AtLogOn -User $user) `
   -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) `
   -Settings  (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                 -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable) `
-  -Description "Starts the local AI Radar news server (node server/index.js) at logon."
+  -Description "Starts the local AI Radar news server hidden at logon."
 ```
 
-The two settings that matter are `-ExecutionTimeLimit (New-TimeSpan -Seconds 0)`
+`LastTaskResult` reports `267009` (`0x41301`) while a task is running — that is
+success, not an error code.
+
+**Why `wscript.exe` and not `node.exe`.** A scheduled task whose logon type is
+*Interactive* runs a console program **in your session, with a visible console
+window**. A plain `node.exe` task therefore leaves a terminal on screen, and
+closing that window kills the server — it looks like a background service but
+isn't. `scripts/start-hidden.vbs` launches the server with no window and waits
+for it, so the task stays in the `Running` state and its *do not start a second
+instance* setting keeps working.
+
+Two settings are doing real work: `-ExecutionTimeLimit (New-TimeSpan -Seconds 0)`
 (no time limit — Radar is a long-running server) and `-MultipleInstances
 IgnoreNew` (never start a second copy while one is already up).
 
 Test it immediately without logging out:
 
 ```powershell
-Start-ScheduledTask  -TaskName "AI Radar"    # starts it now
-Get-ScheduledTaskInfo -TaskName "AI Radar"   # expect LastTaskResult 267009 while running
+Start-ScheduledTask  -TaskName "AI Radar"      # starts it now, no window appears
+Get-ScheduledTaskInfo -TaskName "AI Radar"     # state -> Running
+```
+
+**See what it is doing.** A hidden process has no console, so its output goes to
+`radar.log` in the repo root (`*.log` is git-ignored):
+
+```powershell
+Get-Content radar.log -Tail 40 -Wait
+```
+
+**Stop it:**
+
+```powershell
+Stop-ScheduledTask -TaskName "AI Radar"
+# or, if something else got hold of the port:
+Get-NetTCPConnection -LocalPort 4310 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 ```
 
 Remove it again with:
@@ -156,9 +182,6 @@ Remove it again with:
 ```powershell
 Unregister-ScheduledTask -TaskName "AI Radar" -Confirm:$false
 ```
-
-> Note: `LastTaskResult` reports `267009` (`0x41301`) while a task is running —
-> that is success, not an error code.
 
 ### macOS / Linux
 
@@ -248,6 +271,7 @@ authentication.
 | `node:sqlite` not found, or a parse error on `with { type: 'json' }` | Node is older than 24. Check `node -v` and upgrade. |
 | The brief says *"The curator didn't answer"* | Headlines were still collected and stored, so nothing is lost. Usually the model is unreachable — confirm OpenCode is running and that the model named in `radar.config.json` still exists. The exact error is shown on the page. |
 | *"OpenCode's free tier can only be used from within OpenCode…"* | A free `opencode/*` model was rejected. Radar already runs those in *plain* mode; seeing this means the provider id changed or a different provider needs `mode` forced. See **Choosing a curator model**. |
+| A terminal window opens and closing it stops Radar | The scheduled task is launching `node.exe` directly. An *Interactive* task gives a console app a visible window, and closing it kills the process. Re-register the task to use `scripts/start-hidden.vbs` — see **Running it in the background**. |
 | Port 4310 already in use | Change `port` in `radar.config.json`, or free it: `Get-NetTCPConnection -LocalPort 4310 -State Listen` then `Stop-Process -Id <pid> -Force`. |
 | A source stopped appearing | Run `npm run verify-sources`. Radar tracks per-feed status in the `source_health` table and drops a broken feed without failing the whole scan. |
 | Explore looks empty while a brief exists | Explore defaults to recent items and the filters may be left on. Clear the search box and the topic chips. |
