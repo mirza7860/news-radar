@@ -1,0 +1,7 @@
+# Normalise all text to LF in the repository, so Windows checkouts and CI agree.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.ico binary
+*.woff2 binary

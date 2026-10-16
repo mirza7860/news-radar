@@ -1,0 +1,1940 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>How AI Radar is built — a technical explainer</title>
+    <meta
+      name="description"
+      content="A detailed walkthrough of AI Radar: deterministic feed collection, deterministic scoring, and a single local model call that curates the daily brief."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&display=swap"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400..500&display=swap"
+    />
+    <style>
+      /* =====================================================================
+         This page deliberately reuses AI Radar's own design language: cool
+         green-grey paper, near-black green ink, one chartreuse highlighter,
+         and the six topic colours that already mean something in the app.
+         The highlighter is reserved for judgement — the same rule the app
+         follows for its lead block.
+         ===================================================================== */
+      :root {
+        --paper: #eff2ee;
+        --surface: #f7f9f6;
+        --sunken: #e5eae4;
+        --ink: #131a17;
+        --ink-2: #4b564f;
+        --ink-3: #78837b;
+        --rule: #d6ddd6;
+        --rule-strong: #b9c4bb;
+        --highlight: #d8f14b;
+        --highlight-ink: #1a240e;
+        --danger: #a8351d;
+
+        --topic-models: #2e5be6;
+        --topic-funding: #c22b62;
+        --topic-agents: #6a45d9;
+        --topic-platforms: #0e8c7f;
+        --topic-research: #a8730a;
+        --topic-industry: #66707a;
+
+        --sans: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        --serif: "Newsreader", Georgia, "Times New Roman", serif;
+        --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+
+        --measure: 70ch;
+        --maxw: 1180px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #0f1613;
+          --surface: #16201b;
+          --sunken: #1c2721;
+          --ink: #e8efe9;
+          --ink-2: #a4b1a8;
+          --ink-3: #7d8a81;
+          --rule: #24302a;
+          --rule-strong: #38463d;
+          --highlight: #d8f14b;
+          --highlight-ink: #141c0b;
+          --danger: #e8795c;
+
+          --topic-models: #6f95ff;
+          --topic-funding: #ff6ea1;
+          --topic-agents: #a486ff;
+          --topic-platforms: #34c3b2;
+          --topic-research: #d9a63c;
+          --topic-industry: #9aa6b1;
+        }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+        scroll-behavior: smooth;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--serif);
+        font-size: 18px;
+        line-height: 1.62;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-color: var(--rule-strong);
+        text-underline-offset: 2px;
+      }
+
+      a:hover {
+        text-decoration-color: var(--ink);
+      }
+
+      .skip {
+        position: absolute;
+        left: -9999px;
+        top: 0;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 10px 16px;
+        font-family: var(--sans);
+        z-index: 30;
+      }
+
+      .skip:focus {
+        left: 8px;
+        top: 8px;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--topic-models);
+        outline-offset: 2px;
+      }
+
+      /* --- masthead ------------------------------------------------------ */
+
+      .masthead {
+        border-bottom: 1px solid var(--rule);
+        background: var(--surface);
+      }
+
+      .masthead-inner {
+        max-width: var(--maxw);
+        margin: 0 auto;
+        padding: 14px clamp(18px, 4vw, 44px);
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        font-family: var(--sans);
+      }
+
+      .wordmark {
+        font-weight: 700;
+        font-size: 19px;
+        letter-spacing: -0.01em;
+      }
+
+      .masthead-sub {
+        color: var(--ink-3);
+        font-size: 13.5px;
+      }
+
+      /* --- hero ---------------------------------------------------------- */
+
+      .hero {
+        max-width: var(--maxw);
+        margin: 0 auto;
+        padding: clamp(34px, 6vw, 66px) clamp(18px, 4vw, 44px) 8px;
+      }
+
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--ink-3);
+        display: block;
+        margin-bottom: 14px;
+      }
+
+      h1 {
+        font-family: var(--sans);
+        font-weight: 700;
+        font-variation-settings: "wdth" 92;
+        font-size: clamp(34px, 6vw, 62px);
+        line-height: 1.02;
+        letter-spacing: -0.028em;
+        margin: 0 0 18px;
+        max-width: 19ch;
+      }
+
+      .lede {
+        font-size: clamp(19px, 2.2vw, 23px);
+        line-height: 1.5;
+        margin: 0;
+        max-width: 46ch;
+        color: var(--ink-2);
+      }
+
+      .hero-meta {
+        font-family: var(--sans);
+        font-size: 13px;
+        color: var(--ink-3);
+        margin-top: 26px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+      }
+
+      .hero-meta b {
+        font-weight: 600;
+        color: var(--ink-2);
+      }
+
+      /* --- shell --------------------------------------------------------- */
+
+      .shell {
+        max-width: var(--maxw);
+        margin: 0 auto;
+        padding: 30px clamp(18px, 4vw, 44px) 80px;
+        display: grid;
+        grid-template-columns: 216px minmax(0, 1fr);
+        gap: clamp(28px, 5vw, 64px);
+        align-items: start;
+      }
+
+      aside.toc {
+        position: sticky;
+        top: 20px;
+        font-family: var(--sans);
+        font-size: 13.5px;
+        max-height: calc(100vh - 40px);
+        overflow: auto;
+      }
+
+      .toc-title {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--ink-3);
+        margin: 0 0 12px;
+      }
+
+      .toc ol {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+
+      .toc a {
+        display: block;
+        padding: 5px 10px 5px 12px;
+        color: var(--ink-2);
+        text-decoration: none;
+        border-left: 2px solid var(--rule);
+        line-height: 1.35;
+      }
+
+      .toc a:hover {
+        color: var(--ink);
+        border-left-color: var(--rule-strong);
+      }
+
+      .toc a.is-active {
+        color: var(--ink);
+        border-left-color: var(--highlight);
+        background: var(--sunken);
+        font-weight: 600;
+      }
+
+      .toc .toc-num {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-3);
+        margin-right: 7px;
+      }
+
+      main.article {
+        min-width: 0;
+        max-width: var(--measure);
+      }
+
+      main.article > section {
+        scroll-margin-top: 20px;
+        padding-bottom: 8px;
+      }
+
+      h2 {
+        font-family: var(--sans);
+        font-variation-settings: "wdth" 94;
+        font-weight: 700;
+        font-size: clamp(25px, 3.4vw, 34px);
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+        margin: 54px 0 16px;
+        padding-top: 22px;
+        border-top: 1px solid var(--rule);
+      }
+
+      main.article > section:first-child h2 {
+        margin-top: 0;
+        border-top: none;
+        padding-top: 0;
+      }
+
+      h3 {
+        font-family: var(--sans);
+        font-weight: 600;
+        font-size: 19px;
+        letter-spacing: -0.01em;
+        margin: 34px 0 8px;
+      }
+
+      h4 {
+        font-family: var(--mono);
+        font-weight: 500;
+        font-size: 13px;
+        color: var(--ink-2);
+        margin: 24px 0 6px;
+      }
+
+      p {
+        margin: 0 0 16px;
+      }
+
+      strong {
+        font-weight: 600;
+      }
+
+      code {
+        font-family: var(--mono);
+        font-size: 0.855em;
+        background: var(--sunken);
+        padding: 1px 5px;
+        color: var(--ink);
+      }
+
+      /* --- highlight: the signal colour, used for judgement only --------- */
+
+      mark {
+        background: var(--highlight);
+        color: var(--highlight-ink);
+        padding: 0 4px;
+        font-weight: 500;
+      }
+
+      .callout {
+        background: var(--highlight);
+        color: var(--highlight-ink);
+        padding: 20px 22px;
+        margin: 26px 0;
+      }
+
+      .callout h3 {
+        margin: 0 0 6px;
+        color: var(--highlight-ink);
+        font-size: 20px;
+      }
+
+      .callout p:last-child {
+        margin-bottom: 0;
+      }
+
+      .callout code {
+        background: rgba(26, 36, 14, 0.14);
+        color: var(--highlight-ink);
+      }
+
+      .note {
+        border-left: 3px solid var(--rule-strong);
+        padding: 2px 0 2px 18px;
+        margin: 24px 0;
+        color: var(--ink-2);
+      }
+
+      .note :last-child {
+        margin-bottom: 0;
+      }
+
+      .note-title {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .warn {
+        border-left-color: var(--danger);
+      }
+
+      /* --- code ---------------------------------------------------------- */
+
+      pre {
+        background: var(--sunken);
+        border-left: 3px solid var(--rule-strong);
+        padding: 16px 18px;
+        overflow-x: auto;
+        margin: 18px 0;
+        font-size: 13.5px;
+        line-height: 1.55;
+      }
+
+      pre code {
+        background: none;
+        padding: 0;
+        font-size: inherit;
+      }
+
+      pre .c {
+        color: var(--ink-3);
+        font-style: italic;
+      }
+
+      pre .k {
+        color: var(--topic-funding);
+      }
+
+      pre .s {
+        color: var(--topic-platforms);
+      }
+
+      /* --- tables -------------------------------------------------------- */
+
+      .tbl-wrap {
+        overflow-x: auto;
+        margin: 20px 0;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-family: var(--sans);
+        font-size: 13.5px;
+        min-width: 480px;
+      }
+
+      caption {
+        caption-side: top;
+        text-align: left;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+        padding-bottom: 8px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 8px 12px 8px 0;
+        border-bottom: 1px solid var(--rule);
+        vertical-align: top;
+      }
+
+      th {
+        font-weight: 600;
+        color: var(--ink-2);
+        border-bottom-color: var(--rule-strong);
+        white-space: nowrap;
+      }
+
+      td.num {
+        font-family: var(--mono);
+        text-align: right;
+        padding-right: 16px;
+        white-space: nowrap;
+      }
+
+      /* --- topic chips --------------------------------------------------- */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        font-family: var(--sans);
+        font-size: 12.5px;
+        padding: 2px 9px 2px 7px;
+        border: 1px solid var(--rule);
+        color: var(--ink-2);
+        vertical-align: middle;
+      }
+
+      .swatch {
+        width: 9px;
+        height: 9px;
+        display: inline-block;
+        flex: none;
+      }
+
+      .sw-models {
+        background: var(--topic-models);
+      }
+      .sw-funding {
+        background: var(--topic-funding);
+      }
+      .sw-agents {
+        background: var(--topic-agents);
+      }
+      .sw-platforms {
+        background: var(--topic-platforms);
+      }
+      .sw-research {
+        background: var(--topic-research);
+      }
+      .sw-industry {
+        background: var(--topic-industry);
+      }
+
+      /* --- the funnel ---------------------------------------------------- */
+
+      .funnel {
+        margin: 26px 0 8px;
+      }
+
+      .funnel-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 10px;
+      }
+
+      .funnel-bar {
+        height: 30px;
+        position: relative;
+      }
+
+      .funnel-fill {
+        height: 100%;
+        min-width: 4px;
+      }
+
+      .funnel-label {
+        font-family: var(--sans);
+        font-size: 13px;
+        color: var(--ink-2);
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .funnel-label b {
+        font-family: var(--mono);
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      .funnel-val {
+        font-family: var(--mono);
+        font-size: 14px;
+        color: var(--ink);
+        text-align: right;
+        min-width: 62px;
+      }
+
+      .funnel-note {
+        font-family: var(--sans);
+        font-size: 12.5px;
+        color: var(--ink-3);
+        margin: 14px 0 0;
+      }
+
+      /* --- svg diagram --------------------------------------------------- */
+
+      figure.diagram {
+        margin: 30px 0;
+      }
+
+      figure.diagram svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      figure.diagram figcaption {
+        font-family: var(--sans);
+        font-size: 13px;
+        color: var(--ink-3);
+        margin-top: 12px;
+      }
+
+      svg text {
+        font-family: var(--sans);
+      }
+
+      svg .mono {
+        font-family: var(--mono);
+      }
+
+      .f-ink {
+        fill: var(--ink);
+      }
+      .f-ink2 {
+        fill: var(--ink-2);
+      }
+      .f-ink3 {
+        fill: var(--ink-3);
+      }
+      .f-models {
+        fill: var(--topic-models);
+      }
+      .f-research {
+        fill: var(--topic-research);
+      }
+      .f-industry {
+        fill: var(--topic-industry);
+      }
+      .f-highlight {
+        fill: var(--highlight);
+      }
+      .f-agents {
+        fill: var(--topic-agents);
+      }
+      .f-platforms {
+        fill: var(--topic-platforms);
+      }
+      .svg-box {
+        fill: var(--surface);
+        stroke: var(--rule);
+        stroke-width: 1;
+      }
+      .svg-rule {
+        stroke: var(--rule-strong);
+        stroke-width: 1.5;
+      }
+
+      /* --- compare (plain vs locked) ------------------------------------- */
+
+      .compare {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin: 24px 0;
+      }
+
+      .compare > div {
+        border: 1px solid var(--rule);
+        border-top: 4px solid var(--rule-strong);
+        background: var(--surface);
+        padding: 16px 18px;
+      }
+
+      .compare .is-plain {
+        border-top-color: var(--highlight);
+      }
+
+      .compare .is-locked {
+        border-top-color: var(--topic-industry);
+      }
+
+      .compare h4 {
+        margin: 0 0 4px;
+        font-family: var(--sans);
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      .compare .mode-tag {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--ink-3);
+        display: block;
+        margin-bottom: 10px;
+      }
+
+      .compare ul {
+        margin: 0;
+        padding-left: 18px;
+        font-family: var(--sans);
+        font-size: 13.5px;
+        color: var(--ink-2);
+      }
+
+      .compare li {
+        margin-bottom: 5px;
+      }
+
+      /* --- gotchas list -------------------------------------------------- */
+
+      .gotchas {
+        list-style: none;
+        padding: 0;
+        margin: 20px 0;
+        counter-reset: g;
+      }
+
+      .gotchas > li {
+        position: relative;
+        padding: 18px 0 18px 0;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .gotchas > li:first-child {
+        border-top: 1px solid var(--rule);
+      }
+
+      .gotcha-head {
+        font-family: var(--sans);
+        font-weight: 600;
+        font-size: 17px;
+        letter-spacing: -0.01em;
+        margin: 0 0 6px;
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+
+      .gotcha-head .tag {
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--ink-3);
+        border: 1px solid var(--rule);
+        padding: 1px 7px;
+        white-space: nowrap;
+      }
+
+      .gotchas p {
+        margin: 0 0 8px;
+        font-size: 17px;
+      }
+
+      .gotchas p:last-child {
+        margin-bottom: 0;
+      }
+
+      /* --- sources ------------------------------------------------------- */
+
+      .sources ul {
+        padding-left: 0;
+        list-style: none;
+        font-family: var(--sans);
+        font-size: 13.5px;
+      }
+
+      .sources li {
+        padding: 7px 0;
+        border-bottom: 1px solid var(--rule);
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        align-items: baseline;
+      }
+
+      .sources .path {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--ink);
+        word-break: break-word;
+      }
+
+      .sources .why {
+        color: var(--ink-3);
+        text-align: right;
+        flex: none;
+        font-size: 12.5px;
+      }
+
+      footer.page-foot {
+        border-top: 1px solid var(--rule);
+        margin-top: 40px;
+        padding-top: 16px;
+        font-family: var(--sans);
+        font-size: 12.5px;
+        color: var(--ink-3);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 16px;
+        justify-content: space-between;
+      }
+
+      .toc-mobile {
+        display: none;
+      }
+
+      /* --- responsive ---------------------------------------------------- */
+
+      @media (max-width: 900px) {
+        .shell {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 10px;
+        }
+
+        aside.toc {
+          display: none;
+        }
+
+        .toc-mobile {
+          display: block;
+          border: 1px solid var(--rule);
+          padding: 12px 16px;
+          margin-bottom: 10px;
+          font-family: var(--sans);
+          font-size: 14px;
+          background: var(--surface);
+        }
+
+        .toc-mobile summary {
+          cursor: pointer;
+          font-weight: 600;
+        }
+
+        .toc-mobile ol {
+          margin: 10px 0 0;
+          padding-left: 20px;
+          color: var(--ink-2);
+        }
+
+        .toc-mobile li {
+          margin-bottom: 4px;
+        }
+
+        .compare {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 700px) {
+        body {
+          font-size: 17px;
+        }
+
+        .funnel-row {
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+      }
+
+      @media print {
+        aside.toc,
+        .toc-mobile,
+        .skip {
+          display: none;
+        }
+
+        .shell {
+          display: block;
+          padding: 0;
+        }
+
+        body {
+          background: #fff;
+          color: #000;
+          font-size: 11pt;
+        }
+
+        pre,
+        .callout,
+        .compare > div,
+        table {
+          break-inside: avoid;
+        }
+
+        h2 {
+          break-after: avoid;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <div class="masthead">
+      <div class="masthead-inner">
+        <span class="wordmark">AI Radar</span>
+        <span class="masthead-sub">How it is built — a technical explainer</span>
+      </div>
+    </div>
+
+    <header class="hero">
+      <span class="eyebrow">system explainer</span>
+      <h1>How this radar is built</h1>
+      <p class="lede">
+        A personal news radar for the AI and startup ecosystem: 36 RSS feeds, a deterministic
+        scoring pass, and exactly one call to a local language model per hour. This page explains
+        every stage, why each decision was made, and what went wrong on the way.
+      </p>
+      <div class="hero-meta">
+        <span><b>Written</b> 16 October 2026</span>
+        <span><b>Scope</b> 36 feeds · 6 topics · 6 pipeline stages</span>
+        <span><b>Stack</b> Node 24 · node:sqlite · OpenCode client · plain CSS/JS</span>
+        <span><b>Runtime deps</b> 2</span>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="toc" aria-label="Contents">
+        <p class="toc-title">on this page</p>
+        <ol id="toc-list">
+          <li><a href="#tldr"><span class="toc-num">01</span>The short version</a></li>
+          <li><a href="#approach"><span class="toc-num">02</span>The approach</a></li>
+          <li><a href="#pipeline"><span class="toc-num">03</span>The pipeline</a></li>
+          <li><a href="#collect"><span class="toc-num">04</span>Collect</a></li>
+          <li><a href="#score"><span class="toc-num">05</span>Clean and score</a></li>
+          <li><a href="#store"><span class="toc-num">06</span>Store</a></li>
+          <li><a href="#curate"><span class="toc-num">07</span>Curate</a></li>
+          <li><a href="#resolve"><span class="toc-num">08</span>Resolve</a></li>
+          <li><a href="#serve"><span class="toc-num">09</span>Serve and render</a></li>
+          <li><a href="#sources-list"><span class="toc-num">10</span>The sources</a></li>
+          <li><a href="#built"><span class="toc-num">11</span>How it was built</a></li>
+          <li><a href="#gotchas"><span class="toc-num">12</span>What surprised me</a></li>
+          <li><a href="#next"><span class="toc-num">13</span>What's next</a></li>
+          <li><a href="#sources-files"><span class="toc-num">14</span>Sources</a></li>
+        </ol>
+      </aside>
+
+      <main class="article" id="main">
+        <details class="toc-mobile">
+          <summary>On this page</summary>
+          <ol>
+            <li><a href="#tldr">The short version</a></li>
+            <li><a href="#approach">The approach</a></li>
+            <li><a href="#pipeline">The pipeline</a></li>
+            <li><a href="#collect">Collect</a></li>
+            <li><a href="#score">Clean and score</a></li>
+            <li><a href="#store">Store</a></li>
+            <li><a href="#curate">Curate</a></li>
+            <li><a href="#resolve">Resolve</a></li>
+            <li><a href="#serve">Serve and render</a></li>
+            <li><a href="#sources-list">The sources</a></li>
+            <li><a href="#built">How it was built</a></li>
+            <li><a href="#gotchas">What surprised me</a></li>
+            <li><a href="#next">What's next</a></li>
+            <li><a href="#sources-files">Sources</a></li>
+          </ol>
+        </details>
+
+        <!-- ================= 01 ================= -->
+        <section id="tldr">
+          <h2>The short version</h2>
+          <p>
+            Radar has one job: tell one developer what actually happened in AI today, and let them
+            dig further if they want. It does that with two views — a curated
+            <strong>Brief</strong> and a browse-everything <strong>Explore</strong> — backed by a
+            local SQLite database and an hourly scan.
+          </p>
+
+          <div class="callout">
+            <h3>The one decision everything else follows from</h3>
+            <p>
+              Collection and scoring are <strong>deterministic code</strong>. The language model is
+              used for <strong>exactly one step</strong> — turning a pre-ranked list of headlines
+              into a ranked brief. The model never fetches a page, never chooses what to look at,
+              and can only ever reference items it was handed, by number.
+            </p>
+          </div>
+
+          <p>The whole system, in numbers, from the last scan at the time of writing:</p>
+
+          <div class="funnel">
+            <div class="funnel-row">
+              <div><div class="funnel-bar"><div class="funnel-fill" style="width: 100%; background: var(--topic-industry)"></div></div></div>
+              <div class="funnel-val">561</div>
+            </div>
+            <div class="funnel-label" style="margin: -4px 0 12px">headlines seen across <b>36</b> feeds (36 ok, 0 failed, 6 s timeout budget per feed)</div>
+
+            <div class="funnel-row">
+              <div><div class="funnel-bar"><div class="funnel-fill" style="width: 23%; background: var(--topic-research)"></div></div></div>
+              <div class="funnel-val">130</div>
+            </div>
+            <div class="funnel-label" style="margin: -4px 0 12px">candidates after dedupe, topic scoring and a hard cap — the only thing the model sees</div>
+
+            <div class="funnel-row">
+              <div><div class="funnel-bar"><div class="funnel-fill" style="width: 2.5%; background: var(--highlight)"></div></div></div>
+              <div class="funnel-val">14</div>
+            </div>
+            <div class="funnel-label" style="margin: -4px 0 0">items in the finished brief: 1 lead + 13 entries across 6 sections</div>
+
+            <p class="funnel-note">
+              The funnel is the point. Roughly <strong>97.5% of collected headlines never reach the
+              brief</strong>, and the model spends its judgement on a list that has already been
+              narrowed by code.
+            </p>
+          </div>
+
+          <ul>
+            <li><strong>One scan</strong> = fetch 36 feeds → clean and score → store → one model call → resolve → store the brief. About 50 seconds, most of it waiting on the model.</li>
+            <li><strong>It refreshes itself</strong> every 60 minutes, plus a button in the UI and an HTTP endpoint.</li>
+            <li><strong>Nothing is trusted from the model</strong> except its judgement about <em>which</em> numbered item matters. Every displayed story is a real database row.</li>
+            <li><strong>No build step.</strong> The frontend is one HTML file, one CSS file, one JS module. Two runtime dependencies in total.</li>
+          </ul>
+        </section>
+
+        <!-- ================= 02 ================= -->
+        <section id="approach">
+          <h2>The approach</h2>
+          <p>
+            The obvious way to build an AI news digest is to hand an agent a set of sources and let
+            it browse, read, and write. That is also the fragile way. A browsing agent is slow, its
+            cost scales with how much it reads, it can silently skip a source, and the same prompt
+            can produce a different digest each run because the inputs were never fixed.
+          </p>
+          <p>
+            Radar inverts that. It splits the job into the part that should never be left to
+            judgement and the part that genuinely needs it:
+          </p>
+
+          <div class="tbl-wrap">
+            <table>
+              <caption>The split, and why each side is where it is</caption>
+              <thead>
+                <tr>
+                  <th>Step</th>
+                  <th>Who does it</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Fetch 36 feeds</td>
+                  <td>Deterministic code</td>
+                  <td>Fetching is mechanical. A model here is slower, costlier, and non-reproducible.</td>
+                </tr>
+                <tr>
+                  <td>Clean text, classify topics, score, dedupe</td>
+                  <td>Deterministic code</td>
+                  <td>Rules are auditable and instant. You can read exactly why an item scored 74.</td>
+                </tr>
+                <tr>
+                  <td>Store everything</td>
+                  <td>SQLite</td>
+                  <td>Nothing is lost if curation fails. Explore works regardless.</td>
+                </tr>
+                <tr>
+                  <td>Choose the lead, write the notes, group into sections</td>
+                  <td>A local model</td>
+                  <td>This is real judgement: what matters today, and why, for one reader.</td>
+                </tr>
+                <tr>
+                  <td>Map the brief back to real records</td>
+                  <td>Deterministic code</td>
+                  <td>Makes the model's output safe to render even when it is wrong.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="note">
+            <span class="note-title">design principle</span>
+            <p>
+              The model is treated as an <em>unreliable narrator with good taste</em>. Its opinions
+              are the product; its facts are always re-sourced from the database.
+            </p>
+          </div>
+
+          <h3>What "one model call" actually means</h3>
+          <p>
+            Radar opens a single OpenCode session, sends one prompt containing the numbered
+            candidate list, and reads back one JSON object. There is no tool calling, no
+            multi-turn loop, no agent memory. That constraint is what makes the run cost
+            predictable and the failure mode obvious: either valid JSON comes back, or the scan is
+            marked failed and the previous brief stays on screen.
+          </p>
+        </section>
+
+        <!-- ================= 03 ================= -->
+        <section id="pipeline">
+          <h2>The pipeline</h2>
+          <p>
+            Six stages, executed in order, once per scan. Each stage names the file that owns it —
+            the whole backend is eleven small modules, and this is the map.
+          </p>
+
+          <figure class="diagram">
+            <svg
+              viewBox="0 0 470 806"
+              role="img"
+              aria-label="Vertical pipeline diagram: collect from 36 feeds, clean and score to 130 candidates, store in SQLite, one curation call to the local model, resolve item numbers back to records, then serve the brief and explore views over HTTP."
+            >
+              <!-- stage 1 -->
+              <rect class="svg-box" x="24" y="26" width="422" height="84" />
+              <rect class="f-models" x="24" y="26" width="6" height="84" />
+              <text class="f-ink3" x="46" y="50" font-size="12">Stage 1</text>
+              <text class="f-ink" x="46" y="76" font-size="21" font-weight="600">Collect</text>
+              <text class="f-ink2 mono" x="46" y="96" font-size="12.5">collect.js · fetchFeed, mapPool</text>
+              <text class="f-models" x="430" y="76" font-size="15" font-weight="600" text-anchor="end">36 feeds</text>
+              <text class="f-ink3" x="430" y="96" font-size="12" text-anchor="end">6 at a time</text>
+
+              <!-- arrow 1 -->
+              <line class="svg-rule" x1="52" y1="110" x2="52" y2="146" />
+              <path class="f-ink3" d="M52 156 L47 145 L57 145 Z" />
+
+              <!-- stage 2 -->
+              <rect class="svg-box" x="24" y="156" width="422" height="84" />
+              <rect class="f-research" x="24" y="156" width="6" height="84" />
+              <text class="f-ink3" x="46" y="180" font-size="12">Stage 2</text>
+              <text class="f-ink" x="46" y="206" font-size="21" font-weight="600">Clean &amp; score</text>
+              <text class="f-ink2 mono" x="46" y="226" font-size="12.5">text.js + rank.js · enrich, dedupe</text>
+              <text class="f-research" x="430" y="206" font-size="15" font-weight="600" text-anchor="end">561 → 130</text>
+              <text class="f-ink3" x="430" y="226" font-size="12" text-anchor="end">no model</text>
+
+              <!-- arrow 2 -->
+              <line class="svg-rule" x1="52" y1="240" x2="52" y2="276" />
+              <path class="f-ink3" d="M52 286 L47 275 L57 275 Z" />
+
+              <!-- stage 3 -->
+              <rect class="svg-box" x="24" y="286" width="422" height="84" />
+              <rect class="f-industry" x="24" y="286" width="6" height="84" />
+              <text class="f-ink3" x="46" y="310" font-size="12">Stage 3</text>
+              <text class="f-ink" x="46" y="336" font-size="21" font-weight="600">Store</text>
+              <text class="f-ink2 mono" x="46" y="356" font-size="12.5">db.js · upsertItems, updateItemMeta</text>
+              <text class="f-industry" x="430" y="336" font-size="15" font-weight="600" text-anchor="end">SQLite</text>
+              <text class="f-ink3" x="430" y="356" font-size="12" text-anchor="end">WAL mode</text>
+
+              <!-- arrow 3 -->
+              <line class="svg-rule" x1="52" y1="370" x2="52" y2="406" />
+              <path class="f-ink3" d="M52 416 L47 405 L57 405 Z" />
+
+              <!-- stage 4 : the judgement stage, marked with the highlighter -->
+              <rect class="svg-box" x="24" y="416" width="422" height="84" />
+              <rect class="f-highlight" x="24" y="416" width="6" height="84" />
+              <text class="f-ink3" x="46" y="440" font-size="12">Stage 4</text>
+              <text class="f-ink" x="46" y="466" font-size="21" font-weight="600">Curate</text>
+              <text class="f-ink2 mono" x="46" y="486" font-size="12.5">curate.js · session.generate</text>
+              <text class="f-ink" x="430" y="466" font-size="15" font-weight="600" text-anchor="end">1 call</text>
+              <text class="f-ink3" x="430" y="486" font-size="12" text-anchor="end">~40–50 s</text>
+
+              <!-- arrow 4 -->
+              <line class="svg-rule" x1="52" y1="500" x2="52" y2="536" />
+              <path class="f-ink3" d="M52 546 L47 535 L57 535 Z" />
+
+              <!-- stage 5 -->
+              <rect class="svg-box" x="24" y="546" width="422" height="84" />
+              <rect class="f-agents" x="24" y="546" width="6" height="84" />
+              <text class="f-ink3" x="46" y="570" font-size="12">Stage 5</text>
+              <text class="f-ink" x="46" y="596" font-size="21" font-weight="600">Resolve</text>
+              <text class="f-ink2 mono" x="46" y="616" font-size="12.5">curate.js · resolveBrief</text>
+              <text class="f-agents" x="430" y="596" font-size="15" font-weight="600" text-anchor="end">numbers → rows</text>
+              <text class="f-ink3" x="430" y="616" font-size="12" text-anchor="end">the safety net</text>
+
+              <!-- arrow 5 -->
+              <line class="svg-rule" x1="52" y1="630" x2="52" y2="666" />
+              <path class="f-ink3" d="M52 676 L47 665 L57 665 Z" />
+
+              <!-- stage 6 -->
+              <rect class="svg-box" x="24" y="676" width="422" height="84" />
+              <rect class="f-platforms" x="24" y="676" width="6" height="84" />
+              <text class="f-ink3" x="46" y="700" font-size="12">Stage 6</text>
+              <text class="f-ink" x="46" y="726" font-size="21" font-weight="600">Serve</text>
+              <text class="f-ink2 mono" x="46" y="746" font-size="12.5">index.js + public/ · HTTP, SSE</text>
+              <text class="f-platforms" x="430" y="726" font-size="15" font-weight="600" text-anchor="end">Brief + Explore</text>
+              <text class="f-ink3" x="430" y="746" font-size="12" text-anchor="end">hourly loop</text>
+
+              <text class="f-ink3" x="24" y="792" font-size="12">
+                Only stage 4 involves a model. Everything else is plain code you can read and re-run.
+              </text>
+            </svg>
+            <figcaption>
+              The scan pipeline. Colour on the left edge mirrors the topic palette used elsewhere in
+              the app; the chartreuse bar marks the single stage where the model makes a judgement.
+            </figcaption>
+          </figure>
+        </section>
+
+        <!-- ================= 04 ================= -->
+        <section id="collect">
+          <h2>Stage 1 — Collect</h2>
+          <p>
+            <code>server/collect.js</code> fetches every configured feed, parses it, and turns each
+            entry into a normalised item. It handles RSS 2.0, RSS 1.0/RDF, and Atom in one parser
+            by being generous about where the entry list lives and where the link, date, author and
+            body hide:
+          </p>
+
+          <pre><code><span class="c">// collect.js — one parser, three feed dialects</span>
+<span class="k">function</span> extractEntries(doc) {
+  <span class="k">const</span> root = doc?.rss?.channel ?? doc?.feed ?? doc?.RDF ?? doc?.rdf ?? doc
+  <span class="k">const</span> channel = root?.channel ?? root
+  <span class="k">const</span> items = channel?.item ?? root?.item ?? root?.entry ?? channel?.entry
+  <span class="k">return</span> asArray(items)
+}</code></pre>
+
+          <p>
+            Fetching runs through a small bounded pool — six feeds in flight, each with its own
+            15-second abort signal — so one slow host cannot stall the scan:
+          </p>
+
+          <pre><code><span class="c">// collect.js — bounded concurrency, no external dependency</span>
+<span class="k">export async function</span> mapPool(values, limit, worker) {
+  <span class="k">const</span> results = <span class="k">new</span> Array(values.length)
+  <span class="k">let</span> cursor = 0
+  <span class="k">const</span> runners = Array.from({ length: Math.min(limit, values.length) }, <span class="k">async</span> () =&gt; {
+    <span class="k">while</span> (<span class="k">true</span>) {
+      <span class="k">const</span> index = cursor++
+      <span class="k">if</span> (index &gt;= values.length) <span class="k">return</span>
+      results[index] = <span class="k">await</span> worker(values[index], index)
+    }
+  })
+  <span class="k">await</span> Promise.all(runners)
+  <span class="k">return</span> results
+}</code></pre>
+
+          <p>
+            Every source is recorded in a <code>source_health</code> table on each scan — when it
+            last succeeded, what it returned, how long it took, and the last error if it failed.
+            That table is what feeds the "36 ok, 0 failed" line in the UI, and it is how a quietly
+            broken feed gets noticed instead of silently dropping out of the digest.
+          </p>
+
+          <div class="note">
+            <span class="note-title">item identity</span>
+            <p>
+              Each item gets an id from <code>fingerprint(sourceId, url || title)</code> — a short
+              SHA-1. Because it is content-derived rather than random, re-seeing the same story on
+              the next scan updates the existing row instead of inserting a duplicate.
+            </p>
+          </div>
+        </section>
+
+        <!-- ================= 05 ================= -->
+        <section id="score">
+          <h2>Stage 2 — Clean and score</h2>
+          <p>
+            Raw feed text is dirty. Hacker News descriptions are literally
+            <code>Article URL: … Comments URL: … Points: 862 # Comments: 431</code>. Reddit entries
+            lead with a preview image URL. This stage strips all of that, classifies each item into
+            a topic, gives it a 0–100 signal score, and collapses duplicates.
+          </p>
+
+          <h3>Cleaning</h3>
+          <pre><code><span class="c">// text.js — the patterns that actually occur in these feeds</span>
+text = text.replace(<span class="s">/\b(?:article|story|link|video|comments?)\s*url:\s*\S+/gi</span>, <span class="s">" "</span>)
+text = text.replace(<span class="s">/#?\s*comments?:\s*\d+/gi</span>, <span class="s">" "</span>)
+text = text.replace(<span class="s">/\bpoints:\s*\d+/gi</span>, <span class="s">" "</span>)
+text = text.replace(<span class="s">/https?:\/\/\S+/gi</span>, <span class="s">" "</span>)
+<span class="c">// …then: if what is left merely repeats the headline, return "" so the UI omits it.</span></code></pre>
+          <p>
+            The last line is the subtle one. After removing URLs and labels, a lot of entries
+            reduce to <em>the headline again</em> — so the cleaner compares the residue against the
+            title and returns an empty string when there is nothing new to say. The UI then simply
+            drops the summary line rather than printing the title twice.
+          </p>
+
+          <h3>Topic classification</h3>
+          <p>
+            Six topics drive both the filters and the colours. Each is a keyword list; an item is
+            scored by how many of a topic's keywords it matches (multi-word keywords count double,
+            since they are more specific), and the best match becomes the primary topic:
+          </p>
+
+          <div class="tbl-wrap">
+            <table>
+              <caption>The six topics and their colours — the same hues in the 24-hour strip, the section swatches, and the Explore filters</caption>
+              <thead>
+                <tr><th>Topic</th><th>Colour</th><th>Catches</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><span class="swatch sw-models"></span> Models</td><td class="num">#2E5BE6</td><td>weights, benchmarks, context windows, named model families</td></tr>
+                <tr><td><span class="swatch sw-funding"></span> Funding</td><td class="num">#C22B62</td><td>rounds, valuations, acquisitions, ARR, IPO</td></tr>
+                <tr><td><span class="swatch sw-agents"></span> Agents</td><td class="num">#6A45D9</td><td>agent frameworks, tool calling, MCP, evals, orchestration</td></tr>
+                <tr><td><span class="swatch sw-platforms"></span> Platforms</td><td class="num">#0E8C7F</td><td>APIs, SDKs, pricing, rate limits, integrations, releases</td></tr>
+                <tr><td><span class="swatch sw-research"></span> Research</td><td class="num">#A8730A</td><td>papers, methods, scaling laws, interpretability, alignment</td></tr>
+                <tr><td><span class="swatch sw-industry"></span> Industry</td><td class="num">#66707A</td><td>regulation, policy, lawsuits, compute, hiring, deals</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Scoring</h3>
+          <p>
+            Scoring starts from a base of 28 and moves it by explicit, readable rules — recency
+            tiers, the source's weight, and keyword signals that experience says predict a story
+            worth reading:
+          </p>
+
+          <pre><code><span class="c">// rank.js — signal rules (excerpt)</span>
+[<span class="s">/[$€£]\s?\d[\d.,]*\s?(m|b|bn|billion|million)\b/i</span>, 18],   <span class="c">// a concrete money figure</span>
+[<span class="s">/\b(series [a-e]|seed round|valuation|acquir|merger|ipo)\b/i</span>, 14],
+[<span class="s">/\b(raises|raised|funding|invest)\b/i</span>, 12],
+[<span class="s">/\b(launch|launches|releases?|shipped|announce|unveil)\b/i</span>, 9],
+[<span class="s">/\b(open[- ]?source|open[- ]?weights?|apache 2|mit license)\b/i</span>, 10],
+[<span class="s">/\b(api|sdk|pricing|rate limit|endpoint|mcp|integration)\b/i</span>, 8],
+[<span class="s">/\b(benchmark|sota|outperform|beats|score[sd]?)\b/i</span>, 8],</code></pre>
+
+          <p>
+            Noise rules subtract for opinion pieces, podcasts, top-N roundups, tutorials and
+            sponsored posts. The result is clamped to 0–100 and stored. That number is what makes
+            the bars in the 24-hour strip different heights.
+          </p>
+
+          <h3>Deduplication</h3>
+          <p>
+            The same story syndicated across four outlets should be one line in the brief, not
+            four. <code>dedupe()</code> sorts by score, then drops any item whose title is
+            similar enough (a token-overlap ratio above 0.62) to an already-kept one. The losers
+            are not discarded — they are attached to the survivor as <code>alsoOn</code>, which is
+            where the "also covered by …" line under a story comes from.
+          </p>
+
+          <p>
+            The surviving list is sorted best-first, capped at
+            <code>collection.maxCandidates</code> (130), and then re-sorted <em>newest-first</em>
+            before being written into the prompt — because the curator reads top-down and should
+            meet today's news first.
+          </p>
+        </section>
+
+        <!-- ================= 06 ================= -->
+        <section id="store">
+          <h2>Stage 3 — Store</h2>
+          <p>
+            Everything lands in one SQLite file via Node's built-in <code>node:sqlite</code> — no
+            native module, no ORM, no separate service. Four tables carry the whole system:
+          </p>
+
+          <div class="tbl-wrap">
+            <table>
+              <caption>Schema at a glance — data/radar.db</caption>
+              <thead>
+                <tr><th>Table</th><th>Holds</th><th>Notable columns</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>items</code></td>
+                  <td>Every headline ever collected</td>
+                  <td><code>primary_topic</code>, <code>score</code>, <code>read_at</code>, <code>saved</code>, <code>brief_id</code></td>
+                </tr>
+                <tr>
+                  <td><code>briefs</code></td>
+                  <td>One row per curation attempt</td>
+                  <td><code>payload</code> (the resolved brief as JSON), <code>status</code>, <code>candidate_count</code>, <code>duration_ms</code></td>
+                </tr>
+                <tr>
+                  <td><code>scans</code></td>
+                  <td>One row per scan run</td>
+                  <td><code>feeds_ok</code>, <code>feeds_failed</code>, <code>items_seen</code>, <code>curate_ms</code>, <code>step</code></td>
+                </tr>
+                <tr>
+                  <td><code>source_health</code></td>
+                  <td>Per-feed status</td>
+                  <td><code>last_ok</code>, <code>last_count</code>, <code>last_ms</code>, <code>last_error</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>
+            The insert is an <code>UPSERT</code> keyed on the content fingerprint, so re-seeing a
+            story refreshes its title, summary and score without duplicating it. Writes run in WAL
+            mode, which is what lets the HTTP server keep reading while a scan is writing.
+          </p>
+
+          <div class="note">
+            <span class="note-title">self-healing rows</span>
+            <p>
+              After inserting, every scan re-enriches the <em>whole collection window</em> and
+              writes the results back with <code>updateItemMeta()</code>. That means changing a
+              keyword, a mute rule, or the summary cleaner repairs existing rows on the next scan
+              instead of leaving the database half-old. <code>npm run reclassify</code> does the
+              same thing across the entire store on demand.
+            </p>
+          </div>
+
+          <p>
+            A scan writes its own funnel into the <code>scans</code> table as it goes, updating the
+            <code>step</code> column at each stage — reading sources, curating, done. That is both
+            the audit trail and the source of the live progress text in the UI.
+          </p>
+        </section>
+
+        <!-- ================= 07 ================= -->
+        <section id="curate">
+          <h2>Stage 4 — Curate</h2>
+          <p>
+            This is the only stage with a model in it. <code>server/curate.js</code> opens one
+            OpenCode session, sends one prompt, and reads back one JSON object.
+          </p>
+
+          <h3>The prompt is a list, not a task</h3>
+          <p>
+            The entire prompt payload is a header plus one line per candidate, rendered as a stable,
+            sparse-numbered list. The model is never shown URLs to fetch or files to read; it is
+            shown text, and asked to reply with text:
+          </p>
+
+          <pre><code>Scan window: 2026-10-16T07:12:00.000Z to 2026-10-16T08:00:00.000Z
+Candidates: 130
+
+[1] id=9f2c… | TechCrunch AI | 2h ago | Anthropic's Q3 revenue hits $16.8B… | …
+[2] id=41ba… | Hugging Face  | 3h ago | Muse Spark Open weights are live… | …
+<span class="c">… 128 more lines …</span></code></pre>
+
+          <h3>The reply is a strict shape</h3>
+          <p>
+            The curator's instructions live in a single file —
+            <code>.opencode/agents/radar.md</code> — which is the source of truth used by both
+            execution modes. It asks for raw JSON only, with a headline, one lead, sections keyed by
+            topic, and a short watchlist:
+          </p>
+
+          <pre><code>{
+  <span class="s">"headline"</span>: <span class="s">"one line, max 100 characters"</span>,
+  <span class="s">"lead"</span>: {
+    <span class="s">"itemId"</span>: 3,
+    <span class="s">"why"</span>: <span class="s">"2-3 sentences: what happened and why it matters"</span>,
+    <span class="s">"context"</span>: <span class="s">"1 sentence of background or what to watch next"</span>
+  },
+  <span class="s">"sections"</span>: [
+    { <span class="s">"id"</span>: <span class="s">"models"</span>, <span class="s">"entries"</span>: [ { <span class="s">"itemId"</span>: 7, <span class="s">"note"</span>: <span class="s">"one sentence"</span>, <span class="s">"alsoCoveredBy"</span>: [9] } ] }
+  ],
+  <span class="s">"watchlist"</span>: [<span class="s">"max 3 short lines"</span>]
+}</code></pre>
+
+          <p>
+            The rules in that file are opinionated and worth reading in full. The load-bearing ones:
+            keep at most 3 entries per section and 14 total, omit an empty section rather than
+            padding it, never reuse an item across sections, prefer the primary source when
+            collapsing a story, and drop opinion pieces, listicles, roundups, podcasts and
+            sponsored posts outright.
+          </p>
+
+          <h3>Parsing a reply that may be wrapped in prose</h3>
+          <p>
+            Models add commentary and markdown fences. Rather than trusting the reply to be clean,
+            <code>server/json.js</code> scans for the first balanced <code>{…}</code> object,
+            tracking string state and escapes so braces inside notes do not confuse it:
+          </p>
+
+          <pre><code><span class="c">// json.js — balanced-brace scan, string- and escape-aware</span>
+<span class="k">if</span> (char === <span class="s">'"'</span>) inString = <span class="k">true</span>
+<span class="k">else if</span> (!inString &amp;&amp; char === <span class="s">'{'</span>) depth += 1
+<span class="k">else if</span> (!inString &amp;&amp; char === <span class="s">'}'</span>) {
+  depth -= 1
+  <span class="k">if</span> (depth === 0) <span class="k">return</span> JSON.parse(source.slice(start, i + 1))
+}</code></pre>
+
+          <h3>The rule that cost the most time</h3>
+          <p>
+            OpenCode serves some models for free from the <code>opencode</code> provider — but only
+            when the request looks like a stock session. Attach a custom system prompt, a
+            permission override, or a named agent, and the gateway treats it as third-party traffic
+            and refuses it outright:
+          </p>
+
+          <div class="note warn">
+            <span class="note-title">the error, verbatim</span>
+            <p>
+              <em>"OpenCode's free tier can only be used from within OpenCode…"</em>
+            </p>
+          </div>
+
+          <p>
+            So the curator runs in one of two modes, chosen from the provider id. Free
+            <code>opencode</code> models run <strong>plain</strong>: no agent, no permissions, and
+            the curator instructions prepended into the prompt itself. Any provider you configured
+            yourself (like <code>nvidia</code>) has no such restriction, so there the session is
+            locked down to the tool-free <code>radar</code> agent with a deny-all permission set.
+          </p>
+
+          <pre><code><span class="c">// curate.js — one rule decides how the session is built</span>
+<span class="k">export function</span> curatorMode(model) {
+  <span class="k">if</span> (model?.mode === <span class="s">"plain"</span> || model?.mode === <span class="s">"locked"</span>) <span class="k">return</span> model.mode
+  <span class="k">return</span> model?.providerID === <span class="s">"opencode"</span> ? <span class="s">"plain"</span> : <span class="s">"locked"</span>
+}</code></pre>
+
+          <div class="compare">
+            <div class="is-plain">
+              <h4>Plain mode</h4>
+              <span class="mode-tag">providerIDs: opencode</span>
+              <ul>
+                <li>No agent override.</li>
+                <li>No permission override.</li>
+                <li>Instructions prepended inline.</li>
+                <li>Required for the free tier.</li>
+              </ul>
+            </div>
+            <div class="is-locked">
+              <h4>Locked mode</h4>
+              <span class="mode-tag">every other provider</span>
+              <ul>
+                <li>Uses the <code>radar</code> agent.</li>
+                <li>Deny-all permissions.</li>
+                <li>No tool could be reached anyway.</li>
+                <li>Keeps the prompt clean.</li>
+              </ul>
+            </div>
+          </div>
+
+          <p>
+            The instructions themselves never fork — both modes use the same markdown body, loaded
+            from <code>.opencode/agents/radar.md</code>. Only the delivery changes: as a system
+            prompt in locked mode, as an inline prefix in plain mode.
+          </p>
+        </section>
+
+        <!-- ================= 08 ================= -->
+        <section id="resolve">
+          <h2>Stage 5 — Resolve</h2>
+          <p>
+            The curator answers with item <em>numbers</em>. <code>resolveBrief()</code> is the code
+            that turns those numbers back into real database rows — and it is the reason a wrong
+            model cannot corrupt what you read.
+          </p>
+          <p>
+            Two guards make this safe. First, a number is consumed at most once, so an item cannot
+            appear in two sections:
+          </p>
+
+          <pre><code><span class="c">// curate.js — a number is either valid and unused, or it is dropped</span>
+<span class="k">const</span> take = (rawId) =&gt; {
+  <span class="k">const</span> n = Number.parseInt(rawId, 10)
+  <span class="k">const</span> item = byNumber.get(n)
+  <span class="k">if</span> (!item || used.has(n)) <span class="k">return null</span>
+  used.add(n)
+  <span class="k">return</span> item
+}</code></pre>
+
+          <p>
+            Second, the "also covered by" list is rebuilt from two sources and de-duplicated by
+            source name: the cross-references the model listed, plus the syndicated outlets the
+            dedupe pass already attached to the item. That merge is why a story can show three
+            other outlets even when the model only named one — and why the same outlet never
+            appears twice.
+          </p>
+          <p>
+            Section ids are validated against a whitelist and re-sorted into a fixed order, notes
+            are truncated, and the watchlist is capped at three lines. Anything malformed is
+            dropped silently. The brief that comes out is always internally consistent, even when
+            the model's judgement is questionable.
+          </p>
+
+          <div class="callout">
+            <h3>Worst case, stated plainly</h3>
+            <p>
+              If the model mismatches a note to the wrong story, you get a good story with a note
+              meant for another one. You never get a story that does not exist, a broken link, or a
+              duplicated entry — because every rendered story is a row that was collected and
+              stored by code.
+            </p>
+          </div>
+        </section>
+
+        <!-- ================= 09 ================= -->
+        <section id="serve">
+          <h2>Stage 6 — Serve and render</h2>
+          <p>
+            <code>server/index.js</code> is a plain <code>node:http</code> server: static files from
+            <code>public/</code>, a small JSON API, and a server-sent-events stream so the browser
+            can watch a scan progress without polling.
+          </p>
+
+          <div class="tbl-wrap">
+            <table>
+              <caption>HTTP API — the frontend is a thin client over these</caption>
+              <thead>
+                <tr><th>Route</th><th>Purpose</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>GET /api/bootstrap</code></td><td>Everything the app needs on load: brief, timeline, stats, scan state, sources, topics, config.</td></tr>
+                <tr><td><code>GET /api/timeline?hours=24</code></td><td>The 24-hour strip: 48 buckets, each with its items.</td></tr>
+                <tr><td><code>GET /api/items</code></td><td>Explore. Query by topic, source, text, hours, saved, unread, with paging.</td></tr>
+                <tr><td><code>POST /api/scan</code></td><td>Trigger a scan; returns immediately and streams progress over SSE.</td></tr>
+                <tr><td><code>POST /api/items/:id</code></td><td>Set read or saved on one item.</td></tr>
+                <tr><td><code>POST /api/config</code></td><td>Change the curator model; written back to <code>radar.config.json</code>.</td></tr>
+                <tr><td><code>GET /api/events</code></td><td>Live scan status.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>The hourly loop</h3>
+          <p>
+            A single self-rescheduling timer computes how long until the next scan is due (based on
+            the last scan's start time plus <code>refreshMinutes</code>), waits, runs a scan if one
+            is not already in flight, and reschedules. A separate interval prunes history every
+            twelve hours — items older than 60 days, briefs older than 90. A scan already running
+            is never started twice; the guard is a single in-flight promise.
+          </p>
+
+          <h3>The two views</h3>
+          <p>
+            <strong>Brief</strong> leads with the day's lead story on a chartreuse block — the one
+            place in the app where the highlighter appears, because it marks the curator's single
+            biggest judgement — followed by the themed sections and a short watchlist.
+            <strong>Explore</strong> is everything stored: filter by topic, source, text, unread or
+            saved, with day separators and a tooltip on every bar of the strip.
+          </p>
+
+          <h3>Design decisions, briefly</h3>
+          <ul>
+            <li>Cool green-grey paper and near-black green ink — deliberately not the cream-and-terracotta default.</li>
+            <li>One accent, chartreuse, used only for judgement: the lead block and the live-status dot.</li>
+            <li>Topic colours are data, not decoration: the same six hues appear in the strip, in section swatches, and in Explore chips.</li>
+            <li>Archivo with its variable width axis for display and UI, Newsreader for prose.</li>
+            <li>No border-radius, no cards, no all-caps eyebrow labels — the page should read like a signal desk, not a dashboard.</li>
+            <li>One orchestrated motion: the strip bars rise with a 13&nbsp;ms-per-slot stagger, and nothing else animates for its own sake.</li>
+            <li>Dark mode follows <code>prefers-color-scheme</code>; the strip and the chips keep their meanings in both.</li>
+          </ul>
+        </section>
+
+        <!-- ================= 10 ================= -->
+        <section id="sources-list">
+          <h2>The sources</h2>
+          <p>
+            Thirty-six feeds, all verified working, chosen so that each one answers a question the
+            others cannot. Each source carries a <strong>weight</strong> that is added to its
+            items' scores, because a lab's own announcement is worth more than a search-result
+            echo.
+          </p>
+
+          <div class="tbl-wrap">
+            <table>
+              <caption>36 feeds by category, with their score weight</caption>
+              <thead>
+                <tr><th>Category</th><th>Feeds</th><th>Why it is here</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Labs <span class="chip">weight 7–20</span></td>
+                  <td>OpenAI · Google DeepMind · Hugging Face · Mistral AI · NVIDIA Blog · AWS Machine Learning</td>
+                  <td>Primary sources. Highest weights in the system — 20 for OpenAI, 18 for DeepMind.</td>
+                </tr>
+                <tr>
+                  <td>Press <span class="chip">weight 8–16</span></td>
+                  <td>TechCrunch AI · The Decoder · The Verge AI · Ars Technica · Techmeme · MIT Technology Review · IEEE Spectrum AI · MarkTechPost</td>
+                  <td>Reporting and context the labs do not write themselves.</td>
+                </tr>
+                <tr>
+                  <td>Funding <span class="chip">weight 14</span></td>
+                  <td>Crunchbase News</td>
+                  <td>Rounds and valuations get their own feed rather than being hoped for in the press.</td>
+                </tr>
+                <tr>
+                  <td>Practitioners <span class="chip">weight 9–16</span></td>
+                  <td>Simon Willison · Latent Space · Interconnects · Import AI · One Useful Thing · Ahead of AI · Stratechery</td>
+                  <td>Analysis and interpretation — where "why it matters" usually comes from.</td>
+                </tr>
+                <tr>
+                  <td>Community <span class="chip">weight 7–12</span></td>
+                  <td>Hacker News (front page, 150+ points) · Hacker News (LLM search) · r/LocalLLaMA</td>
+                  <td>What builders are actually excited about, before the press writes it up.</td>
+                </tr>
+                <tr>
+                  <td>Releases <span class="chip">weight 6–8</span></td>
+                  <td>GitHub Blog · GitHub Releases for openai-python, LangChain, llama.cpp, transformers, vLLM, the Vercel AI SDK</td>
+                  <td>Granular truth about API and SDK changes that a blog post would round off.</td>
+                </tr>
+                <tr>
+                  <td>Research <span class="chip">weight 6</span></td>
+                  <td>arXiv cs.AI · arXiv cs.LG</td>
+                  <td>Low weight and per-feed limits, deliberately: papers are plentiful and rarely the day's lead.</td>
+                </tr>
+                <tr>
+                  <td>Search <span class="chip">weight 6–9</span></td>
+                  <td>Google News for "artificial intelligence" (last 24h) and for "Anthropic"</td>
+                  <td>Coverage for labs that publish no feed of their own.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="note">
+            <span class="note-title">on the Anthropic and Meta gap</span>
+            <p>
+              Neither publishes a feed of its own, so their news arrives through press, community
+              and the Google News queries rather than a first-party source. That is a real
+              asymmetry in the source list, not an oversight — it is also why the Anthropic query
+              exists as a dedicated feed.
+            </p>
+          </div>
+
+          <p>
+            Two per-source levers exist beyond weight: <code>limit</code> caps how many entries are
+            taken from a feed (arXiv takes 12 and 10; the release feeds take 6–8), and the global
+            <code>windowHours</code> of 48 decides how far back an item may be to stay eligible.
+          </p>
+        </section>
+
+        <!-- ================= 11 ================= -->
+        <section id="built">
+          <h2>How it was built</h2>
+          <p>
+            The order of work mattered, and several early assumptions were wrong. This is the
+            honest sequence.
+          </p>
+
+          <h3>First: prove the ground, not the feature</h3>
+          <p>
+            Before writing the app, the environment was probed: Node version, whether
+            <code>node:sqlite</code> actually works, whether the npm registry is reachable, whether
+            the OpenCode service can be reached from a plain Node process at all. That last one is
+            where the first real discovery was.
+          </p>
+
+          <h3>Dead end: the embedded SDK</h3>
+          <p>
+            The obvious path was the OpenCode SDK as a library. It does not work under a plain Node
+            process — it fails importing <code>drizzle-orm/column.js</code>, because the package
+            ships only the <code>.cjs</code> build of that file. Rather than fight it, the client
+            was pointed at the <strong>already-running OpenCode background service</strong> instead:
+            discover it with <code>Service.ensure()</code>, then create sessions over HTTP. That
+            removed the broken dependency entirely and turned out to be the more honest
+            architecture anyway — the app talks to the service exactly as any other client would.
+          </p>
+
+          <h3>Then: build the boring 80% first</h3>
+          <p>
+            Collection, cleaning, scoring, and storage were written and verified <em>before</em> any
+            model was involved. Feeds were probed individually with a small
+            <code>verify-sources</code> script until all 36 returned usable entries — that step
+            caught feeds that parse but yield zero items, which is a different failure from an HTTP
+            error and would otherwise be silent.
+          </p>
+          <p>
+            Then a full scan was run end to end with curation disabled, purely to check the
+            numbers: how many items are actually seen per scan, how much dedupe collapses, how many
+            candidates survive the cap. Only once that funnel looked right was the model wired in.
+          </p>
+
+          <h3>The classification bug</h3>
+          <p>
+            The first full scan produced a brief where <em>every single item</em> was filed under
+            Industry. The cause was ordering: items were being written to the database before topic
+            enrichment ran, so the stored row kept the schema default. The fix was to enrich before
+            the insert, and — more importantly — to add a backfill that re-enriches the whole window
+            on every scan, so a row can never be left stale by a later change to the rules.
+          </p>
+
+          <h3>Choosing the curator by A/B, not by vibes</h3>
+          <p>
+            Two models were run against the same real 130-candidate set and the resulting briefs
+            read side by side. The free DeepSeek model won clearly: better coverage, specific
+            numbers preserved, and the correct story chosen as the lead. The other candidate worked
+            but attached a note to the wrong item — exactly the failure mode the resolve stage
+            exists to contain. That comparison script was kept as
+            <code>npm run compare-models</code>.
+          </p>
+
+          <h3>Finding the free-tier rule</h3>
+          <p>
+            The single most time-consuming discovery: free <code>opencode</code> models refuse to
+            answer as soon as the session carries a custom system prompt or a permissions override.
+            This was found by bisecting the session parameters until the call succeeded, and it
+            directly shaped the plain/locked split described above. It is also why the curator
+            instructions live in one markdown file and get delivered two different ways, rather
+            than being maintained twice.
+          </p>
+
+          <h3>Last: the frontend, and fixing what it revealed</h3>
+          <p>
+            The UI came last, and building it surfaced data problems that the API alone had hidden:
+            duplicated "also covered by" outlets, summaries that were just Hacker News footers, and
+            summaries that repeated the headline. Each was fixed at the layer that owned it —
+            mostly in the cleaner and the resolver — with the UI holding only a thin defensive
+            check, not the fix itself.
+          </p>
+
+          <div class="note">
+            <span class="note-title">why the model was never asked to fetch anything</span>
+            <p>
+              Every problem above is a problem about <em>inputs</em>. By fixing the inputs with
+              deterministic code, the model's only remaining job is judgement — and judgement is the
+              thing it is actually good at, and the only thing whose failure the resolve stage can
+              absorb.
+            </p>
+          </div>
+        </section>
+
+        <!-- ================= 12 ================= -->
+        <section id="gotchas">
+          <h2>What surprised me</h2>
+          <p>
+            The non-obvious behaviours, in rough order of how much time each one cost.
+          </p>
+
+          <ul class="gotchas">
+            <li>
+              <p class="gotcha-head"><span class="tag">free tier</span> A custom system prompt is what breaks free models</p>
+              <p>
+                The restriction is not about how many requests you make or which model you pick. It
+                is about whether the session <em>looks</em> like a stock one. A permission override
+                alone is enough to trip it — which is counter-intuitive, since the whole point of a
+                deny-all permission set is to be more restrictive, not less.
+              </p>
+            </li>
+            <li>
+              <p class="gotcha-head"><span class="tag">ordering</span> Enrich after insert silently defaults everything</p>
+              <p>
+                The database defaults <code>primary_topic</code> to <code>industry</code>. If
+                classification runs after the write, you get a plausible-looking database where
+                everything is "Industry" and no error anywhere. This is the class of bug that only
+                a full end-to-end scan reveals.
+              </p>
+            </li>
+            <li>
+              <p class="gotcha-head"><span class="tag">feed data</span> A broken feed is not always an error</p>
+              <p>
+                A feed can return HTTP 200 and parse cleanly while yielding nothing usable. Feeding
+                it three entries and checking they are non-empty catches both failures at once.
+              </p>
+            </li>
+            <li>
+              <p class="gotcha-head"><span class="tag">text</span> The noisiest source field is the one you least expect</p>
+              <p>
+                Hacker News descriptions are raw link-plus-comment metadata. They looked like real
+                summaries until they were rendered in a list next to each other — which is an
+                argument for building the UI early enough to see what the data actually looks like.
+              </p>
+            </li>
+            <li>
+              <p class="gotcha-head"><span class="tag">model output</span> A wrong answer and an unusable answer need different handling</p>
+              <p>
+                If the model returns prose instead of JSON, the whole brief fails and the previous
+                one stays up with an error state. If it returns valid JSON with bad judgement, you
+                get a slightly worse brief. Treating those as the same failure would either be too
+                brittle or too forgiving.
+              </p>
+            </li>
+            <li>
+              <p class="gotcha-head"><span class="tag">packaging</span> It ran fine and still would not have installed</p>
+              <p>
+                The app worked for days while <code>package.json</code> declared no dependencies at
+                all, because <code>node_modules</code> already existed on disk. A fresh clone would
+                have installed nothing. It was caught by trying a clean install in a scratch
+                directory — worth doing before calling anything "done".
+              </p>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ================= 13 ================= -->
+        <section id="next">
+          <h2>What's next</h2>
+          <p>The honest open edges, roughly in the order I would tackle them.</p>
+          <ul>
+            <li>
+              <strong>First-party coverage for the labs without feeds.</strong> The Google News
+              queries are a workaround; a proper source for Anthropic and Meta announcements would
+              close the one real gap in the source list.
+            </li>
+            <li>
+              <strong>Evaluation of the curator, not just A/B.</strong> Right now model quality is
+              judged by reading two briefs side by side. A small fixed candidate set with a known
+              good answer would make regressions visible automatically.
+            </li>
+            <li>
+              <strong>Cross-scan story continuity.</strong> The brief knows what happened today; it
+              does not know that a story is the third development in a thread it has covered all
+              week.
+            </li>
+            <li>
+              <strong>Retention of the model's reasoning.</strong> Failed curations store the raw
+              reply, but successful ones discard it — keeping it would make bad judgement
+              diagnosable after the fact.
+            </li>
+            <li>
+              <strong>A second opinion on the lead.</strong> The single most consequential choice in
+              the whole system is made by one model call with no check on it.
+            </li>
+          </ul>
+        </section>
+
+        <!-- ================= 14 ================= -->
+        <section id="sources-files" class="sources">
+          <h2>Sources</h2>
+          <p>
+            Everything above was written from the files below, read directly during this session.
+            No secrets or credentials were present in any of them; nothing required redaction.
+          </p>
+          <ul>
+            <li><span class="path">server/config.js</span><span class="why">topics, all 36 feeds and weights, config merge</span></li>
+            <li><span class="path">server/collect.js</span><span class="why">feed parsing, normalisation, mapPool</span></li>
+            <li><span class="path">server/text.js</span><span class="why">entity decoding, cleaning, fingerprinting, similarity</span></li>
+            <li><span class="path">server/rank.js</span><span class="why">classification, scoring, dedupe, candidate list</span></li>
+            <li><span class="path">server/db.js</span><span class="why">schema, upserts, timeline, stats, pruning</span></li>
+            <li><span class="path">server/curate.js</span><span class="why">client, mode rule, prompt, JSON resolve</span></li>
+            <li><span class="path">server/json.js</span><span class="why">balanced-brace extraction</span></li>
+            <li><span class="path">server/scan.js</span><span class="why">the six-stage orchestration</span></li>
+            <li><span class="path">server/bus.js</span><span class="why">event bus behind the SSE stream</span></li>
+            <li><span class="path">server/index.js</span><span class="why">HTTP routes, scheduler, pruning timer</span></li>
+            <li><span class="path">.opencode/agents/radar.md</span><span class="why">the curator's instructions</span></li>
+            <li><span class="path">public/index.html</span><span class="why">page structure and fonts</span></li>
+            <li><span class="path">public/styles.css</span><span class="why">design tokens, light and dark palettes</span></li>
+            <li><span class="path">public/app.js</span><span class="why">brief and explore rendering, strip, tooltip, SSE</span></li>
+            <li><span class="path">radar.config.json</span><span class="why">the effective configuration</span></li>
+            <li><span class="path">README.md</span><span class="why">setup, scripts, and the plain/locked rule</span></li>
+          </ul>
+          <p>
+            Live figures in this document were read from the running server's
+            <code>/api/bootstrap</code> endpoint and the <code>scans</code> table at the time of
+            writing.
+          </p>
+        </section>
+
+        <footer class="page-foot">
+          <span>AI Radar — system explainer</span>
+          <span>Last updated 16 October 2026, 20:20</span>
+        </footer>
+      </main>
+    </div>
+
+    <script>
+      // Scroll-spy for the sidebar table of contents. Static anchors only; no
+      // innerHTML, no external calls, no clipboard access.
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll("#toc-list a"));
+        if (!links.length || !("IntersectionObserver" in window)) return;
+
+        var byId = {};
+        var sections = [];
+        links.forEach(function (a) {
+          var id = a.getAttribute("href").slice(1);
+          var el = document.getElementById(id);
+          if (el) {
+            byId[id] = a;
+            sections.push({ id: id, el: el });
+          }
+        });
+
+        var visible = new Set();
+        var observer = new IntersectionObserver(
+          function (entries) {
+            entries.forEach(function (entry) {
+              if (entry.isIntersecting) visible.add(entry.target.id);
+              else visible.delete(entry.target.id);
+            });
+            // Highlight the first section, in document order, that is on screen.
+            var active = null;
+            for (var i = 0; i < sections.length; i++) {
+              if (visible.has(sections[i].id)) {
+                active = sections[i].id;
+                break;
+              }
+            }
+            links.forEach(function (a) {
+              a.classList.toggle("is-active", a.getAttribute("href") === "#" + active);
+            });
+          },
+          { rootMargin: "-10% 0px -75% 0px", threshold: 0 }
+        );
+
+        sections.forEach(function (s) {
+          observer.observe(s.el);
+        });
+      })();
+    </script>
+  </body>
+</html>

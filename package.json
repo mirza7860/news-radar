@@ -1,0 +1,18 @@
+{
+  "name": "news-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal AI-industry news radar, curated by a local OpenCode agent.",
+  "dependencies": {
+    "@opencode/client": "2.0.31",
+    "fast-xml-parser": "^5.11.2"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "scan": "node server/scan-cli.js",
+    "reclassify": "node server/reclassify.mjs",
+    "verify-sources": "node server/verify-sources.mjs",
+    "compare-models": "node server/compare-models.mjs"
+  }
+}

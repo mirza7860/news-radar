@@ -1,0 +1,22 @@
+{
+  "model": {
+    "providerID": "opencode",
+    "id": "deepseek-v4.1-flash-free",
+    "variant": null
+  },
+  "refreshMinutes": 60,
+  "autoScanOnBoot": true,
+  "port": 4310,
+  "collection": {
+    "windowHours": 48,
+    "maxCandidates": 130,
+    "summaryChars": 340,
+    "maxPerSource": 25,
+    "concurrency": 6,
+    "feedTimeoutMs": 15000
+  },
+  "curator": {
+    "enabled": true,
+    "timeoutMs": 300000
+  }
+}
